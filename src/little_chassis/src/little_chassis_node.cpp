@@ -1,9 +1,12 @@
 #include "little_chassis/little_chassis_node.hpp"
-#include "little_chassis/udp_messages.hpp"
-#include <chrono>
-#include <cstring>
-
-using namespace std::chrono_literals;
+#include "little_chassis/ros_messages.h"
+#include "little_chassis/topics/chassis_state_publisher.hpp"
+#include "little_chassis/topics/cmd_vel_subscriber.hpp"
+#include "little_chassis/topics/odom_publisher.hpp"
+#include "little_chassis/services/io_control_service.hpp"
+#include "little_chassis/services/light_control_service.hpp"
+#include "little_chassis/services/motion_control_service.hpp"
+#include "little_chassis/params_transfer/parameter_transfer.hpp"
 using little_chassis::LittleChassisNode;
 
 /**
@@ -14,43 +17,86 @@ using little_chassis::LittleChassisNode;
  */
 LittleChassisNode::LittleChassisNode()
     : Node("little_chassis"),
-      cmd_sock_(io_ctx_)
+      cmdSock_(ioCtx_)
 {
     /* Declare & get parameters */
-    declare_parameter("wheel_base", 0.30);
-    declare_parameter("wheel_diameter", 0.15);
     declare_parameter("mcu_ip", "192.168.55.100");
     declare_parameter("mcu_cmd_port", 12000);
+    declare_parameter("heartbeat_period_ms", 1000);
+    declare_parameter("heartbeat_timeout_ms", 1500);
+    ParameterTransfer::DeclareParameters(*this);
 
-    std::string mcu_ip;
-    int cmd_port;
-    get_parameter("wheel_base", wheel_base_);
-    get_parameter("wheel_diameter", wheel_diameter_);
-    get_parameter("mcu_ip", mcu_ip);
-    get_parameter("mcu_cmd_port", cmd_port);
+    std::string mcuIp;
+    int cmdPort;
+    int hbPeriodMs;
+    int hbTimeoutMs;
+    get_parameter("mcu_ip", mcuIp);
+    get_parameter("mcu_cmd_port", cmdPort);
+    get_parameter("heartbeat_period_ms", hbPeriodMs);
+    get_parameter("heartbeat_timeout_ms", hbTimeoutMs);
 
-    /* ROS interfaces */
-    cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
-        "cmd_vel", 10,
-        std::bind(&LittleChassisNode::cmdCallback, this, std::placeholders::_1));
-    left_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("left_wheel/odom", 10);
-    right_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("right_wheel/odom", 10);
+    heartbeatPeriod_ = std::chrono::milliseconds(std::max(10, hbPeriodMs));
+    heartbeatTimeout_ = std::chrono::milliseconds(std::max(hbPeriodMs, hbTimeoutMs));
 
     /* Boost.Asio sockets */
-    RCLCPP_INFO(get_logger(), "Connecting to MCU at %s:%d", mcu_ip.c_str(), cmd_port);
-    
-    mcu_endpoint_ = udp::endpoint(boost::asio::ip::make_address(mcu_ip), cmd_port);
-    cmd_sock_.open(udp::v4());
-    
-    startReceive();
+    RCLCPP_INFO(get_logger(), "Connecting to MCU at %s:%d", mcuIp.c_str(), cmdPort);
 
-    /* Heartbeat timer */
-    heartbeat_timer_ = create_wall_timer(100ms, std::bind(&LittleChassisNode::heartBeat, this));
+    mcuEndpoint_ = udp::endpoint(boost::asio::ip::make_address(mcuIp), cmdPort);
+    cmdSock_.open(udp::v4());
+
+    StartReceive();
+
+    RegisterMessageCallback(ROS_HEART_BEAT, [this](const uint8_t *data, std::size_t len)
+                               { this->HandleHeartbeat(data, len); });
+
+    heartbeatTimer_ = this->create_wall_timer(
+        heartbeatPeriod_, [this]
+        { this->SendHeartbeat(); });
+
+    heartbeatWatchdogTimer_ = this->create_wall_timer(
+        heartbeatTimeout_ / 2, [this]
+        { this->EvaluateHeartbeat(); });
 
     /* Spin io_context in a background thread */
     running_ = true;
-    io_thread_ = std::thread([this]
-                             { io_ctx_.run(); });
+    ioThread_ = std::thread([this]
+                             { ioCtx_.run(); });
+}
+
+void LittleChassisNode::InitializeInterfaces()
+{
+    if (interfacesInitialized_)
+        return;
+
+    auto self = std::dynamic_pointer_cast<LittleChassisNode>(shared_from_this());
+    if (!self)
+        return;
+
+    if (!parameterTransfer_)
+        parameterTransfer_ = std::make_unique<ParameterTransfer>();
+    parameterTransfer_->Init(self);
+
+    /* Topic subscribers/publishers */
+    cmdVelSub_ = std::make_unique<CmdVelSubscriber>();
+    cmdVelSub_->Init(self, "cmd_vel");
+
+    odomPub_ = std::make_unique<OdomPublisher>();
+    odomPub_->Init(self, "odom", "odom", "base_link");
+
+    chassisStatePub_ = std::make_unique<ChassisStatePublisher>();
+    chassisStatePub_->Init(self, "chassis_state_raw");
+
+    /* Service servers */
+    ioControlService_ = std::make_unique<IoControlService>();
+    ioControlService_->Init(self, "io_control", ROS_CMD_READ_IO);
+
+    lightControlService_ = std::make_unique<LightControlService>();
+    lightControlService_->Init(self, "light_control", ROS_CMD_LIGHT);
+
+    motionControlService_ = std::make_unique<MotionControlService>();
+    motionControlService_->Init(self, "motion_control", ROS_CMD_MOTION);
+
+    interfacesInitialized_ = true;
 }
 
 /**
@@ -62,30 +108,40 @@ LittleChassisNode::LittleChassisNode()
 LittleChassisNode::~LittleChassisNode()
 {
     running_ = false;
-    io_ctx_.stop();
-    if (io_thread_.joinable())
-        io_thread_.join();
+    ioCtx_.stop();
+    if (ioThread_.joinable())
+        ioThread_.join();
 }
 
-/**
- * @brief Callback function for receiving Twist messages.
- * 
- * This function converts the Twist message into a UDP command packet and sends it
- * to the MCU to control the robot's motion.
- * 
- * @param msg The received Twist message containing linear and angular velocities.
- */
-void LittleChassisNode::cmdCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+void LittleChassisNode::RegisterMessageCallback(MessageType_t type,
+                                                std::function<void(const uint8_t *, std::size_t)> callback)
 {
-    UdpSetRobotMotion_t udpCommandPacket;
-    udpCommandPacket.msgType = UDP_MSG_TYPE_SET_ROBOT_MOTION;
-    udpCommandPacket.speed = static_cast<float>(msg->linear.x);
-    udpCommandPacket.omega = static_cast<float>(msg->angular.z);
+    std::lock_guard<std::mutex> lock(callbacksMutex_);
+    callbacks_[type] = std::move(callback);
+}
+
+void LittleChassisNode::SendToMcu(const uint8_t *data, std::size_t len)
+{
+    if (!data || len == 0)
+        return;
+
     boost::system::error_code ec;
-    cmd_sock_.send_to(boost::asio::buffer(&udpCommandPacket, sizeof(udpCommandPacket)),
-                      mcu_endpoint_, 0, ec);
+    cmdSock_.send_to(boost::asio::buffer(data, len), mcuEndpoint_, 0, ec);
     if (ec)
+    {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "send_to error: %s", ec.message().c_str());
+    }
+}
+
+void LittleChassisNode::ForceMcuOffline(const char *reason)
+{
+    if (mcuOnline_.exchange(false, std::memory_order_relaxed))
+    {
+        const char *msg = reason ? reason : "MCU marked offline";
+        RCLCPP_WARN(get_logger(), "%s", msg);
+    }
+    if (parameterTransfer_)
+        parameterTransfer_->OnMcuOffline();
 }
 
 /**
@@ -94,11 +150,11 @@ void LittleChassisNode::cmdCallback(const geometry_msgs::msg::Twist::SharedPtr m
  * This function sets up the socket to listen for incoming packets and
  * binds the handler to process received data.
  */
-void LittleChassisNode::startReceive()
+void LittleChassisNode::StartReceive()
 {
-    cmd_sock_.async_receive_from(
-        boost::asio::buffer(recv_buf_), sender_endpoint_,
-        std::bind(&LittleChassisNode::handleReceive, this, std::placeholders::_1, std::placeholders::_2));
+    cmdSock_.async_receive_from(
+        boost::asio::buffer(recvBuf_), senderEndpoint_,
+        std::bind(&LittleChassisNode::HandleReceive, this, std::placeholders::_1, std::placeholders::_2));
 }
 
 /**
@@ -110,41 +166,19 @@ void LittleChassisNode::startReceive()
  * @param ec The error code indicating the result of the receive operation.
  * @param bytes_recvd The number of bytes received in the packet.
  */
-void LittleChassisNode::handleReceive(const boost::system::error_code &ec,
-                                      std::size_t bytes_recvd)
+void LittleChassisNode::HandleReceive(const boost::system::error_code &ec,
+                                      std::size_t bytesRecvd)
 {
-    if (!ec && bytes_recvd > 0)
+    if (!ec && bytesRecvd > 0)
     {
-        const uint32_t type = *reinterpret_cast<const uint32_t *>(recv_buf_.data());
-        const auto now = this->now();
+        const uint32_t rawType = *reinterpret_cast<const uint32_t *>(recvBuf_.data());
+        const auto msgType = static_cast<MessageType_t>(rawType);
 
-        switch (type)
+        if (DispatchCallback(msgType, recvBuf_.data(), bytesRecvd))
         {
-            case UDP_MSG_TYPE_MOTOR_INFO:
-            {
-                if (bytes_recvd >= sizeof(UdpMotorInfo_t))
-                {
-                    const auto *m = reinterpret_cast<const UdpMotorInfo_t *>(recv_buf_.data());
-                    RCLCPP_DEBUG(get_logger(), "motor info: speed[0]=%.3f, speed[1]=%.3f, position[0]=%.3f, position[1]=%.3f",
-                                 m->speed[0], m->speed[1], m->position[0], m->position[1]);
-                    publishWheelOdom(m->position[0] * (wheel_diameter_ * M_PI / 1000000.0),
-                                     m->position[1] * (wheel_diameter_ * M_PI / 1000000.0),
-                                     now);
-                }
-                break;
-            }
-            case UDP_MSG_TYPE_SYSTEM_STATUS:
-            {
-                if (bytes_recvd >= sizeof(UdpSystemStatus_t))
-                {
-                    const auto *s = reinterpret_cast<const UdpSystemStatus_t *>(recv_buf_.data());
-                    RCLCPP_DEBUG(get_logger(), "system status: voltage=%.2f, current    =%.2f, capacity=%.2f%%", s->voltage, s->current, s->capacity);
-                }
-                break;
-            }
-            default:
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                                    "unknown pkt 0x%02x", type);
+            if (running_)
+                StartReceive();
+            return;
         }
     }
     else if (ec != boost::asio::error::operation_aborted)
@@ -153,42 +187,70 @@ void LittleChassisNode::handleReceive(const boost::system::error_code &ec,
     }
 
     if (running_)
-        startReceive(); // re‑arm
+        StartReceive(); // re‑arm
 }
 
-/**
- * @brief Publish wheel odometry messages for left and right wheels.
- * 
- * @param left_dist Distance traveled by the left wheel in metres.
- * @param right_dist Distance traveled by the right wheel in metres.
- * @param stamp Timestamp for the odometry messages.
- */
-void LittleChassisNode::publishWheelOdom(double left_dist,
-                                         double right_dist,
-                                         const rclcpp::Time &stamp)
+bool LittleChassisNode::DispatchCallback(MessageType_t type, const uint8_t *data, std::size_t len)
 {
-    auto make_msg = [&](double d, const std::string &frame)
+    std::function<void(const uint8_t *, std::size_t)> cb;
     {
-        nav_msgs::msg::Odometry msg;
-        msg.header.stamp = stamp;
-        msg.header.frame_id = frame;
-        msg.child_frame_id = "base_link";
-        msg.pose.pose.position.x = d;
-        return msg;
-    };
+        std::lock_guard<std::mutex> lock(callbacksMutex_);
+        auto it = callbacks_.find(type);
+        if (it == callbacks_.end())
+            return false;
+        cb = it->second;
+    }
 
-    left_odom_pub_->publish(make_msg(left_dist, "left_wheel"));
-    right_odom_pub_->publish(make_msg(right_dist, "right_wheel"));
+    if (cb)
+    {
+        cb(data, len);
+        return true;
+    }
+    return false;
 }
 
-/**
- * @brief Send a heartbeat packet to the MCU.
- */
-void LittleChassisNode::heartBeat()
+void LittleChassisNode::SendHeartbeat()
 {
-    UdpHeartbeat_t heartbeatPacket;
-    heartbeatPacket.msgType = UDP_MSG_TYP_HEARTBEAT;
-    boost::system::error_code ec;
-    cmd_sock_.send_to(boost::asio::buffer(&heartbeatPacket, sizeof(heartbeatPacket)), mcu_endpoint_, 0, ec);
-    if (ec) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "heartbeat send error: %s", ec.message().c_str());
+    HeartBeatMessage_t hb{};
+    hb.messageType = ROS_HEART_BEAT;
+    hb.messageID = heartbeatMessageId_.fetch_add(1, std::memory_order_relaxed);
+    hb.success = 0;
+    hb.reset = 0;
+
+    SendToMcu(reinterpret_cast<const uint8_t *>(&hb), sizeof(hb));
+}
+
+void LittleChassisNode::HandleHeartbeat(const uint8_t *data, std::size_t len)
+{
+    if (!data || len < sizeof(HeartBeatMessage_t))
+        return;
+
+    const auto nowNs = std::chrono::steady_clock::now().time_since_epoch().count();
+    lastHeartbeatNs_.store(nowNs, std::memory_order_relaxed);
+
+    if (!mcuOnline_.exchange(true, std::memory_order_relaxed))
+    {
+        RCLCPP_INFO(get_logger(), "MCU heartbeat online");
+        if (parameterTransfer_)
+            parameterTransfer_->OnMcuOnline();
+    }
+}
+
+void LittleChassisNode::EvaluateHeartbeat()
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto lastNs = lastHeartbeatNs_.load(std::memory_order_relaxed);
+    if (lastNs == 0)
+        return; // never received yet
+
+    const auto last = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(lastNs));
+    if (now - last > heartbeatTimeout_)
+    {
+        if (mcuOnline_.exchange(false, std::memory_order_relaxed))
+        {
+            RCLCPP_WARN(get_logger(), "MCU heartbeat timeout - marking offline");
+            if (parameterTransfer_)
+                parameterTransfer_->OnMcuOffline();
+        }
+    }
 }

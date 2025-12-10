@@ -1,0 +1,19 @@
+little_chassis:
+  ros__parameters:
+    mcu_ip: "192.168.55.100"
+    mcu_cmd_port: 12000
+    heartbeat_period_ms: 1000
+    heartbeat_timeout_ms: 1500
+    mcu_param_timeout_ms: 1000
+    mcu_param_max_retries: 3
+
+    state_feedback_hz: 20
+    odometry_feedback_hz: 50
+    battery_feedback_hz: 1
+    
+    wheel_diameter: 0.15
+    track_width: 0.30
+    max_linear_accel: 1.0
+    max_angular_accel: 1.0
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0

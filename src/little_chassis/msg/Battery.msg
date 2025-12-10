@@ -1,0 +1,7 @@
+float32 voltage
+float32 current
+float32 temperature
+float32 capacity
+float32 design_capacity
+float32 charge_percentage
+bool battery_is_charging
