@@ -67,6 +67,7 @@ namespace little_chassis
         /* Heartbeat ----------------------------------------*/
         rclcpp::TimerBase::SharedPtr heartbeatTimer_;
         rclcpp::TimerBase::SharedPtr heartbeatWatchdogTimer_;
+        rclcpp::TimerBase::SharedPtr offlineLogTimer_;
         std::atomic<uint32_t> heartbeatMessageId_{0};
         std::atomic<int64_t> lastHeartbeatNs_{0};
         std::atomic<bool> mcuOnline_{false};

@@ -57,6 +57,15 @@ LittleChassisNode::LittleChassisNode()
         heartbeatTimeout_ / 2, [this]
         { this->EvaluateHeartbeat(); });
 
+    offlineLogTimer_ = this->create_wall_timer(
+        std::chrono::seconds(2), [this]
+        {
+            if (!mcuOnline_.load(std::memory_order_relaxed))
+            {
+                RCLCPP_WARN(get_logger(), "MCU offline");
+            }
+        });
+
     /* Spin io_context in a background thread */
     running_ = true;
     ioThread_ = std::thread([this]
