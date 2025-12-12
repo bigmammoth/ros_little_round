@@ -6,9 +6,6 @@ using little_chassis::LittleChassisNode;
 
 void ParameterTransfer::DeclareParameters(rclcpp::Node &node)
 {
-    node.declare_parameter("mcu_param_timeout_ms", 1000);
-    node.declare_parameter("mcu_param_max_retries", 3);
-
     node.declare_parameter("state_feedback_hz", 20);
     node.declare_parameter("odometry_feedback_hz", 50);
     node.declare_parameter("battery_feedback_hz", 1);
@@ -20,12 +17,16 @@ void ParameterTransfer::DeclareParameters(rclcpp::Node &node)
     node.declare_parameter("max_angular_vel", 2.0);
 }
 
-void ParameterTransfer::Init(const std::shared_ptr<LittleChassisNode> &node)
+void ParameterTransfer::Init(const std::shared_ptr<LittleChassisNode> &node,
+                             std::chrono::milliseconds timeout,
+                             int maxRetries)
 {
     if (!node)
         return;
 
     node_ = node;
+    parameterTimeout_ = timeout;
+    parameterMaxRetries_ = std::max(1, maxRetries);
     LoadParameters(node);
 
     node->RegisterMessageCallback(ROS_FEEDBACK_PARAMETERS,
@@ -117,14 +118,6 @@ void ParameterTransfer::EvaluateParameterResponse()
 
 void ParameterTransfer::LoadParameters(const std::shared_ptr<LittleChassisNode> &node)
 {
-    int paramTimeoutMs{1000};
-    int paramMaxRetries{3};
-    node->get_parameter("mcu_param_timeout_ms", paramTimeoutMs);
-    node->get_parameter("mcu_param_max_retries", paramMaxRetries);
-
-    parameterTimeout_ = std::chrono::milliseconds(std::max(10, paramTimeoutMs));
-    parameterMaxRetries_ = std::max(1, paramMaxRetries);
-
     ParametersMessage_t params{};
     params.messageType = ROS_CMD_PARAMETERS;
     params.messageID = 0;

@@ -43,6 +43,8 @@ LittleChassisNode::LittleChassisNode()
 
     mcuEndpoint_ = udp::endpoint(boost::asio::ip::make_address(mcuIp), cmdPort);
     cmdSock_.open(udp::v4());
+    cmdSock_.set_option(udp::socket::reuse_address(true));
+    cmdSock_.bind(udp::endpoint(udp::v4(), cmdPort));
 
     StartReceive();
 
@@ -83,7 +85,9 @@ void LittleChassisNode::InitializeInterfaces()
 
     if (!parameterTransfer_)
         parameterTransfer_ = std::make_unique<ParameterTransfer>();
-    parameterTransfer_->Init(self);
+
+    // Use fixed defaults: 1000ms timeout, 3 retries. Adjust here if needed.
+    parameterTransfer_->Init(self, std::chrono::milliseconds(1000), 3);
 
     /* Topic subscribers/publishers */
     cmdVelSub_ = std::make_unique<CmdVelSubscriber>();
@@ -93,7 +97,7 @@ void LittleChassisNode::InitializeInterfaces()
     odomPub_->Init(self, "odom", "odom", "base_link");
 
     chassisStatePub_ = std::make_unique<ChassisStatePublisher>();
-    chassisStatePub_->Init(self, "chassis_state_raw");
+    chassisStatePub_->Init(self, "chassis_state");
 
     /* Service servers */
     ioControlService_ = std::make_unique<IoControlService>();

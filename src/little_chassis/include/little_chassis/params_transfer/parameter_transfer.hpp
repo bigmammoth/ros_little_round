@@ -16,7 +16,9 @@ namespace little_chassis
     public:
         static void DeclareParameters(rclcpp::Node &node);
 
-        void Init(const std::shared_ptr<LittleChassisNode> &node);
+        void Init(const std::shared_ptr<LittleChassisNode> &node,
+              std::chrono::milliseconds timeout,
+              int maxRetries);
         void OnMcuOnline();
         void OnMcuOffline();
 
