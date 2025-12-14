@@ -108,11 +108,11 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'lidar_launch_file',
-            default_value='rplidar_a1_launch.py',
+            default_value='rplidar_a2m8_launch.py',
             description='Which rplidar_ros launch file to include (e.g. rplidar_s2_launch.py).',
         ),
         DeclareLaunchArgument('channel_type', default_value='serial'),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/rplidar'),
         DeclareLaunchArgument('serial_baudrate', default_value='115200'),
         DeclareLaunchArgument('lidar_frame_id', default_value='laser'),
         DeclareLaunchArgument('inverted', default_value='false'),
@@ -145,10 +145,11 @@ def generate_launch_description():
         DeclareLaunchArgument('laser_frame', default_value='laser'),
         DeclareLaunchArgument('laser_x', default_value='0.0'),
         DeclareLaunchArgument('laser_y', default_value='0.0'),
-        DeclareLaunchArgument('laser_z', default_value='0.0'),
+        DeclareLaunchArgument('laser_z', default_value='0.1495'),
         DeclareLaunchArgument('laser_roll', default_value='0.0'),
         DeclareLaunchArgument('laser_pitch', default_value='0.0'),
-        DeclareLaunchArgument('laser_yaw', default_value='0.0'),
+        # Under REP-103 (X forward, Y left, Z up): X -> -Y is -90deg yaw about +Z
+        DeclareLaunchArgument('laser_yaw', default_value='-1.57079632679'),
 
         lidar_include,
         chassis_include,
