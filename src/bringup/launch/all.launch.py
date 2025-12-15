@@ -70,14 +70,14 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='base_to_laser_tf_pub',
         arguments=[
-            laser_x,
-            laser_y,
-            laser_z,
-            laser_roll,
-            laser_pitch,
-            laser_yaw,
-            base_frame,
-            laser_frame,
+            '--x', laser_x,
+            '--y', laser_y,
+            '--z', laser_z,
+            '--roll', laser_roll,
+            '--pitch', laser_pitch,
+            '--yaw', laser_yaw,
+            '--frame-id', base_frame,
+            '--child-frame-id', laser_frame,
         ],
         output='screen',
     )
@@ -102,6 +102,23 @@ def generate_launch_description():
             slam_params_file,
             {'use_sim_time': use_sim_time},
         ],
+        condition=IfCondition(enable_slam),
+    )
+
+    slam_lifecycle_manager = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_slam',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'autostart': True,
+            # slam_toolbox may not establish a nav2 bond on some distros/configs;
+            # disabling the bond wait avoids spurious bringup aborts.
+            'bond_timeout': 0.0,
+            'attempt_respawn_reconnection': False,
+            'node_names': ['slam_toolbox'],
+        }],
         condition=IfCondition(enable_slam),
     )
 
@@ -156,4 +173,5 @@ def generate_launch_description():
         odom_to_tf,
         base_to_laser_tf,
         slam_toolbox_node,
+        slam_lifecycle_manager,
     ])
